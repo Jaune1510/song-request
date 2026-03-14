@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: transparent;
+    font-family: 'DM Sans', sans-serif;
+    overflow: hidden;
+    width: 380px;
+  }
+
+  #widget {
+    position: relative;
+    padding: 14px 16px;
+    background: rgba(8, 8, 12, 0.88);
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 10px;
+    backdrop-filter: blur(12px);
+    min-height: 72px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  #widget::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 16px; right: 16px;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  }
+
+  #now-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  #status-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex-shrink: 0;
+    box-shadow: 0 0 6px var(--accent);
+    transition: background 0.4s;
+  }
+  #status-dot.idle { background: #444; box-shadow: none; }
+
+  #label {
+    font-family: 'Space Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 2px;
+    color: rgba(255,255,255,0.3);
+    text-transform: uppercase;
+    flex-shrink: 0;
+    width: 28px;
+  }
+
+  #song-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: #fff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+    line-height: 1.2;
+  }
+  #song-title.idle-text {
+    color: rgba(255,255,255,0.35);
+    font-weight: 300;
+    font-style: italic;
+  }
+
+  #requester {
+    font-family: 'Space Mono', monospace;
+    font-size: 9px;
+    color: var(--accent);
+    flex-shrink: 0;
+    opacity: 0.85;
+  }
+
+  #progress-wrap {
+    width: 100%;
+    height: 2px;
+    background: rgba(255,255,255,0.06);
+    border-radius: 2px;
+    overflow: hidden;
+    display: none;
+  }
+  #progress-bar {
+    height: 100%;
+    width: 0%;
+    background: var(--accent);
+    border-radius: 2px;
+    transition: width 1s linear;
+    box-shadow: 0 0 6px var(--accent);
+  }
+
+  #queue-row {
+    display: none;
+    align-items: center;
+    gap: 8px;
+  }
+  #queue-label {
+    font-family: 'Space Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 1.5px;
+    color: rgba(255,255,255,0.2);
+    text-transform: uppercase;
+    flex-shrink: 0;
+  }
+  #queue-list {
+    font-size: 11px;
+    color: rgba(255,255,255,0.45);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+  }
+  #queue-count {
+    font-family: 'Space Mono', monospace;
+    font-size: 9px;
+    color: rgba(255,255,255,0.2);
+    flex-shrink: 0;
+  }
+
+  #yt-player { display: none; }
+</style>
+</head>
+<body>
+
+<div id="widget">
+  <div id="now-row">
+    <div id="status-dot" class="idle"></div>
+    <div id="label">NOW</div>
+    <div id="song-title" class="idle-text">Esperando canciones...</div>
+    <div id="requester"></div>
+  </div>
+  <div id="progress-wrap"><div id="progress-bar"></div></div>
+  <div id="queue-row">
+    <div id="queue-label">NEXT</div>
+    <div id="queue-list"></div>
+    <div id="queue-count"></div>
+  </div>
+</div>
+
+<iframe
+  id="yt-player"
+  src="about:blank"
+  allow="autoplay; encrypted-media"
+  allowfullscreen
+  style="display:none; width:1px; height:1px; border:none;">
+</iframe>
+
+<script>
+// ═══════════════════════════════════════════
+//  ⚙️ CONFIGURACIÓN — edita estos valores
+// ═══════════════════════════════════════════
+const CONFIG = {
+  channel:      'jaunehale_mochi',         // Canal de Twitch (minúsculas)
+  twitchToken:  'eb289qypaqvqco29pwpegzbn4rwnji',   // Token de twitchapps.com/tmi
+  ytApiKey:     'AIzaSyCR33VmGTBh0Wapxl_jSDX2d0B_JKxbOVQ',                 // YouTube Data API Key
+  playlistUrl:  '',                 // URL playlist YouTube de fondo (opcional)
+  volume:       70,                 // Volumen 0-100
+  maxQueue:     20,                 // Máximo de canciones en cola
+  srCommand:    '!sr',              // Comando song request
+  skipCommand:  '!skip',            // Comando skip (solo mods)
+  queueCommand: '!queue',           // Comando ver cola
+  confirmMsg:   '🎵 ¡Canción agregada!',
+  notFoundMsg:  '❌ Error, canción no encontrada.',
+  accentColor:  '#7B61FF',          // Color del widget
+};
+
+// ═══════════════════════════════════════════
+//  ESTADO GLOBAL
+// ═══════════════════════════════════════════
+const queue        = [];
+let current        = null;
+let chatWs         = null;
+let botWs          = null;
+let currentVideoId = null;
+let videoDuration  = 0;
+let videoStartTime = 0;
+let progressTimer  = null;
+let isPlayingPlaylist = false;
+
+// Aplicar color accent
+document.documentElement.style.setProperty('--accent', CONFIG.accentColor);
+
+// Preparar comandos
+CONFIG.srCommand    = CONFIG.srCommand.toLowerCase();
+CONFIG.skipCommand  = CONFIG.skipCommand.toLowerCase();
+CONFIG.queueCommand = CONFIG.queueCommand.toLowerCase();
+
+// Extraer playlist ID
+const plMatch = CONFIG.playlistUrl.match(/[?&]list=([A-Za-z0-9_-]+)/);
+CONFIG.playlistId = plMatch ? plMatch[1] : null;
+
+// Arrancar
+connectTwitch();
+
+// ═══════════════════════════════════════════
+//  IFRAME YOUTUBE
+// ═══════════════════════════════════════════
+function playVideo(videoId) {
+  currentVideoId = videoId;
+  videoStartTime = Date.now();
+  videoDuration  = 0;
+
+  const iframe = document.getElementById('yt-player');
+  iframe.src = 'https://www.youtube.com/embed/' + videoId
+    + '?autoplay=1&controls=0&rel=0';
+
+  getVideoDuration(videoId).then(dur => {
+    videoDuration = dur;
+    startProgress();
+  });
+}
+
+function stopVideo() {
+  const iframe = document.getElementById('yt-player');
+  iframe.src = 'about:blank';
+  currentVideoId = null;
+  videoDuration  = 0;
+  stopProgress();
+}
+
+async function getVideoDuration(videoId) {
+  if (!CONFIG.ytApiKey) return 0;
+  try {
+    const r = await fetch('https://www.googleapis.com/youtube/v3/videos?part=contentDetails&id=' + videoId + '&key=' + CONFIG.ytApiKey);
+    const d = await r.json();
+    if (!d.items || d.items.length === 0) return 0;
+    const iso = d.items[0].contentDetails.duration;
+    const m = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+    if (!m) return 0;
+    return (parseInt(m[1] || 0) * 3600) + (parseInt(m[2] || 0) * 60) + parseInt(m[3] || 0);
+  } catch { return 0; }
+}
+
+function watchForEnd() {
+  clearInterval(progressTimer);
+  if (!videoDuration) return;
+
+  progressTimer = setInterval(() => {
+    const elapsed = (Date.now() - videoStartTime) / 1000;
+    const pct = Math.min(elapsed / videoDuration * 100, 100);
+    document.getElementById('progress-bar').style.width = pct + '%';
+    if (elapsed >= videoDuration - 1) {
+      clearInterval(progressTimer);
+      onSongEnded();
+    }
+  }, 1000);
+}
+
+// ═══════════════════════════════════════════
+//  REPRODUCCIÓN
+// ═══════════════════════════════════════════
+function tryPlayNext() {
+  if (queue.length > 0) {
+    isPlayingPlaylist = false;
+    current = queue.shift();
+    playVideo(current.videoId);
+    updateUI();
+  } else {
+    startPlaylist();
+  }
+}
+
+function startPlaylist() {
+  if (!CONFIG.playlistId) { setIdleUI(); return; }
+  isPlayingPlaylist = true;
+  current = null;
+  const iframe = document.getElementById('yt-player');
+  iframe.src = 'https://www.youtube.com/embed/videoseries?list=' + CONFIG.playlistId
+    + '&autoplay=1&controls=0&rel=0&shuffle=1';
+  setIdleUI();
+}
+
+function onSongEnded() {
+  stopProgress();
+  tryPlayNext();
+}
+
+// ═══════════════════════════════════════════
+//  PROGRESS BAR
+// ═══════════════════════════════════════════
+function startProgress() {
+  document.getElementById('progress-wrap').style.display = 'block';
+  document.getElementById('progress-bar').style.width = '0%';
+  videoStartTime = Date.now();
+  watchForEnd();
+}
+
+function stopProgress() {
+  clearInterval(progressTimer);
+  document.getElementById('progress-wrap').style.display = 'none';
+  document.getElementById('progress-bar').style.width = '0%';
+}
+
+// ═══════════════════════════════════════════
+//  UI
+// ═══════════════════════════════════════════
+function updateUI() {
+  if (!current) { setIdleUI(); return; }
+  document.getElementById('status-dot').className = '';
+  document.getElementById('song-title').className = '';
+  document.getElementById('song-title').textContent = current.title;
+  document.getElementById('requester').textContent  = '@' + current.requester;
+  updateQueueRow();
+}
+
+function setIdleUI() {
+  document.getElementById('status-dot').className = 'idle';
+  const t = document.getElementById('song-title');
+  t.className   = 'idle-text';
+  t.textContent = isPlayingPlaylist ? '♪ Playlist de fondo' : 'Esperando canciones...';
+  document.getElementById('requester').textContent = '';
+  document.getElementById('queue-row').style.display = 'none';
+  stopProgress();
+}
+
+function updateQueueRow() {
+  const row   = document.getElementById('queue-row');
+  const list  = document.getElementById('queue-list');
+  const count = document.getElementById('queue-count');
+  if (queue.length === 0) { row.style.display = 'none'; return; }
+  row.style.display = 'flex';
+  list.textContent  = queue[0].title;
+  count.textContent = queue.length > 1 ? '+' + (queue.length - 1) : '';
+}
+
+// ═══════════════════════════════════════════
+//  YOUTUBE HELPERS
+// ═══════════════════════════════════════════
+function extractVideoId(input) {
+  const m = input.match(/(?:v=|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+  return m ? m[1] : null;
+}
+
+async function searchVideo(query) {
+  if (!CONFIG.ytApiKey) return null;
+  try {
+    const url = 'https://www.googleapis.com/youtube/v3/search?part=snippet'
+      + '&q=' + encodeURIComponent(query)
+      + '&type=video&maxResults=1&key=' + CONFIG.ytApiKey;
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    const d = await r.json();
+    if (!d.items || d.items.length === 0) return null;
+    const item = d.items[0];
+    return { videoId: item.id.videoId, title: item.snippet.title };
+  } catch { return null; }
+}
+
+async function getTitle(videoId) {
+  try {
+    const r = await fetch('https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=' + videoId + '&format=json');
+    const d = await r.json();
+    return d.title;
+  } catch { return videoId; }
+}
+
+// ═══════════════════════════════════════════
+//  TWITCH IRC — leer (anónimo) + escribir (bot)
+// ═══════════════════════════════════════════
+function connectTwitch() {
+  chatWs = new WebSocket('wss://irc-ws.chat.twitch.tv:443');
+
+  chatWs.onopen = () => {
+    chatWs.send('NICK justinfan' + Math.floor(Math.random() * 10000));
+    chatWs.send('JOIN #' + CONFIG.channel);
+  };
+
+  chatWs.onmessage = e => {
+    const msg = e.data;
+    if (msg.includes('PING')) {
+      chatWs.send('PONG :tmi.twitch.tv');
+      return;
+    }
+    parseIRC(msg);
+  };
+
+  chatWs.onclose = () => setTimeout(connectTwitch, 4000);
+  chatWs.onerror = () => chatWs.close();
+
+  if (CONFIG.twitchToken && CONFIG.twitchToken !== 'oauth:xxxxxxxx') connectBotChat();
+}
+
+function connectBotChat() {
+  botWs = new WebSocket('wss://irc-ws.chat.twitch.tv:443');
+
+  botWs.onopen = () => {
+    botWs.send('PASS ' + CONFIG.twitchToken);
+    botWs.send('NICK srbot');
+    botWs.send('JOIN #' + CONFIG.channel);
+  };
+
+  botWs.onmessage = e => {
+    if (e.data.includes('PING')) botWs.send('PONG :tmi.twitch.tv');
+  };
+
+  botWs.onclose = () => setTimeout(connectBotChat, 4000);
+  botWs.onerror = () => botWs.close();
+}
+
+function sendChat(msg) {
+  if (!botWs || botWs.readyState !== WebSocket.OPEN) return;
+  botWs.send('PRIVMSG #' + CONFIG.channel + ' :' + msg);
+}
+
+// ═══════════════════════════════════════════
+//  PARSE IRC
+// ═══════════════════════════════════════════
+function parseIRC(raw) {
+  const match = raw.match(/:(\w+)!\w+@\w+\.tmi\.twitch\.tv PRIVMSG #\w+ :(.*)/);
+  if (!match) return;
+  const user    = match[1];
+  const message = match[2];
+  handleCommand(user, message);
+}
+
+// ═══════════════════════════════════════════
+//  COMANDOS
+// ═══════════════════════════════════════════
+async function handleCommand(user, msg) {
+  const lower = msg.toLowerCase();
+
+  // — !sr —
+  if (lower.startsWith(CONFIG.srCommand)) {
+    const arg = msg.substring(CONFIG.srCommand.length).trim();
+    if (!arg) return;
+
+    if (queue.length >= CONFIG.maxQueue) {
+      sendChat('@' + user + ' La cola está llena. Intenta más tarde.');
+      return;
+    }
+
+    let videoId = extractVideoId(arg);
+    let title   = null;
+
+    if (!videoId) {
+      const result = await searchVideo(arg);
+      if (!result) {
+        sendChat('@' + user + ' ' + CONFIG.notFoundMsg);
+        return;
+      }
+      videoId = result.videoId;
+      title   = result.title;
+    }
+
+    if (!title) title = await getTitle(videoId);
+    queue.push({ videoId, title, requester: user });
+    sendChat('@' + user + ' ' + CONFIG.confirmMsg);
+
+    if (!currentVideoId && !isPlayingPlaylist) tryPlayNext();
+    else updateQueueRow();
+    return;
+  }
+
+  // — !skip —
+  if (lower === CONFIG.skipCommand) {
+    stopVideo();
+    tryPlayNext();
+    return;
+  }
+
+  // — !queue —
+  if (lower === CONFIG.queueCommand) {
+    if (queue.length === 0) {
+      sendChat('La cola está vacía.');
+    } else {
+      const preview = queue.slice(0, 3).map((s, i) => (i+1) + '. ' + s.title.substring(0, 25)).join(' | ');
+      sendChat('Cola (' + queue.length + '): ' + preview + (queue.length > 3 ? ' ...' : ''));
+    }
+    return;
+  }
+
+  // — !play —
+  if (lower === '!play') {
+    queue.length = 0;
+    stopVideo();
+    startPlaylist();
+  }
+}
+</script>
+</body>
+</html>
